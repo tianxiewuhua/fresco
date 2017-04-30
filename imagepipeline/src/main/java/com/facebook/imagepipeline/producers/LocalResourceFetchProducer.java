@@ -10,21 +10,21 @@
 package com.facebook.imagepipeline.producers;
 
 import java.io.IOException;
-import java.io.InputStream;
 import java.util.concurrent.Executor;
 
 import android.content.res.AssetFileDescriptor;
 import android.content.res.Resources;
 
-import com.facebook.common.internal.VisibleForTesting;
-import com.facebook.imagepipeline.memory.PooledByteBufferFactory;
+import com.facebook.common.memory.PooledByteBufferFactory;
+import com.facebook.imagepipeline.image.EncodedImage;
 import com.facebook.imagepipeline.request.ImageRequest;
 
 /**
  * Executes a local fetch from a resource.
  */
 public class LocalResourceFetchProducer extends LocalFetchProducer {
-  @VisibleForTesting static final String PRODUCER_NAME = "LocalResourceFetchProducer";
+
+  public static final String PRODUCER_NAME = "LocalResourceFetchProducer";
 
   private final Resources mResources;
 
@@ -37,12 +37,13 @@ public class LocalResourceFetchProducer extends LocalFetchProducer {
   }
 
   @Override
-  protected InputStream getInputStream(ImageRequest imageRequest) throws IOException {
-    return mResources.openRawResource(getResourceId(imageRequest));
+  protected EncodedImage getEncodedImage(ImageRequest imageRequest) throws IOException {
+    return getEncodedImage(
+        mResources.openRawResource(getResourceId(imageRequest)),
+        getLength(imageRequest));
   }
 
-  @Override
-  protected int getLength(ImageRequest imageRequest) {
+  private int getLength(ImageRequest imageRequest) {
     AssetFileDescriptor fd = null;
     try {
       fd = mResources.openRawResourceFd(getResourceId(imageRequest));

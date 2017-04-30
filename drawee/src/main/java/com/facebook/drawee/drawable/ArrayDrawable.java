@@ -9,6 +9,9 @@
 
 package com.facebook.drawee.drawable;
 
+import javax.annotation.Nullable;
+
+import android.annotation.TargetApi;
 import android.graphics.Canvas;
 import android.graphics.ColorFilter;
 import android.graphics.Matrix;
@@ -16,6 +19,7 @@ import android.graphics.PixelFormat;
 import android.graphics.Rect;
 import android.graphics.RectF;
 import android.graphics.drawable.Drawable;
+import android.os.Build;
 
 import com.facebook.common.internal.Preconditions;
 
@@ -34,6 +38,8 @@ public class ArrayDrawable extends Drawable
 
   // layers
   private final Drawable[] mLayers;
+  // drawable parents for the layers (lazily created)
+  private final DrawableParent[] mDrawableParents;
 
   // temp rect to avoid allocations
   private final Rect mTmpRect = new Rect();
@@ -54,6 +60,7 @@ public class ArrayDrawable extends Drawable
     for (int i = 0; i < mLayers.length; i++) {
       DrawableUtils.setCallbacks(mLayers[i], this, this);
     }
+    mDrawableParents = new DrawableParent[mLayers.length];
   }
 
   /**
@@ -69,52 +76,68 @@ public class ArrayDrawable extends Drawable
    * @param index index of drawable to get
    * @return drawable at the specified index
    */
+  @Nullable
   public Drawable getDrawable(int index) {
+    Preconditions.checkArgument(index >= 0);
+    Preconditions.checkArgument(index < mLayers.length);
     return mLayers[index];
   }
 
-  /** Sets a new drawable at the specified index. */
-  public void setDrawable(int index, Drawable drawable) {
+  /** Sets a new drawable at the specified index, and return the previous drawable, if any. */
+  @Nullable
+  public Drawable setDrawable(int index, @Nullable Drawable drawable) {
     Preconditions.checkArgument(index >= 0);
     Preconditions.checkArgument(index < mLayers.length);
-    if (drawable != mLayers[index]) {
-      if (mIsMutated) {
-        drawable = drawable.mutate();
+    final Drawable oldDrawable = mLayers[index];
+    if (drawable != oldDrawable) {
+      if (drawable != null && mIsMutated) {
+        drawable.mutate();
       }
+
       DrawableUtils.setCallbacks(mLayers[index], null, null);
       DrawableUtils.setCallbacks(drawable, null, null);
       DrawableUtils.setDrawableProperties(drawable, mDrawableProperties);
-      DrawableUtils.copyProperties(drawable, mLayers[index]);
+      DrawableUtils.copyProperties(drawable, this);
       DrawableUtils.setCallbacks(drawable, this, this);
       mIsStatefulCalculated = false;
       mLayers[index] = drawable;
       invalidateSelf();
     }
+    return oldDrawable;
   }
 
 
   @Override
   public int getIntrinsicWidth() {
-    int width = 0;
+    int width = -1;
     for (int i = 0; i < mLayers.length; i++) {
-      width = Math.max(width, mLayers[i].getIntrinsicWidth());
+      Drawable drawable = mLayers[i];
+      if (drawable != null) {
+        width = Math.max(width, drawable.getIntrinsicWidth());
+      }
     }
-    return width;
+    return width > 0 ? width : -1;
   }
 
   @Override
   public int getIntrinsicHeight() {
-    int height = 0;
+    int height = -1;
     for (int i = 0; i < mLayers.length; i++) {
-      height = Math.max(height, mLayers[i].getIntrinsicHeight());
+      Drawable drawable = mLayers[i];
+      if (drawable != null) {
+        height = Math.max(height, drawable.getIntrinsicHeight());
+      }
     }
-    return height;
+    return height > 0 ? height : -1;
   }
 
   @Override
   protected void onBoundsChange(Rect bounds) {
     for (int i = 0; i < mLayers.length; i++) {
-      mLayers[i].setBounds(bounds);
+      Drawable drawable = mLayers[i];
+      if (drawable != null) {
+        drawable.setBounds(bounds);
+      }
     }
   }
 
@@ -123,7 +146,8 @@ public class ArrayDrawable extends Drawable
     if (!mIsStatefulCalculated) {
       mIsStateful = false;
       for (int i = 0; i < mLayers.length; i++) {
-        mIsStateful |= mLayers[i].isStateful();
+        Drawable drawable = mLayers[i];
+        mIsStateful |= drawable != null && drawable.isStateful();
       }
       mIsStatefulCalculated = true;
     }
@@ -134,7 +158,8 @@ public class ArrayDrawable extends Drawable
   protected boolean onStateChange(int[] state) {
     boolean stateChanged = false;
     for (int i = 0; i < mLayers.length; i++) {
-      if (mLayers[i].setState(state)) {
+      Drawable drawable = mLayers[i];
+      if (drawable != null && drawable.setState(state)) {
         stateChanged = true;
       }
     }
@@ -145,7 +170,8 @@ public class ArrayDrawable extends Drawable
   protected boolean onLevelChange(int level) {
     boolean levelChanged = false;
     for (int i = 0; i < mLayers.length; i++) {
-      if (mLayers[i].setLevel(level)) {
+      Drawable drawable = mLayers[i];
+      if (drawable != null && drawable.setLevel(level)) {
         levelChanged = true;
       }
     }
@@ -155,7 +181,10 @@ public class ArrayDrawable extends Drawable
   @Override
   public void draw(Canvas canvas) {
     for (int i = 0; i < mLayers.length; i++) {
-      mLayers[i].draw(canvas);
+      Drawable drawable = mLayers[i];
+      if (drawable != null) {
+        drawable.draw(canvas);
+      }
     }
   }
 
@@ -167,11 +196,14 @@ public class ArrayDrawable extends Drawable
     padding.bottom = 0;
     final Rect rect = mTmpRect;
     for (int i = 0; i < mLayers.length; i++) {
-      mLayers[i].getPadding(rect);
-      padding.left = Math.max(padding.left, rect.left);
-      padding.top = Math.max(padding.top, rect.top);
-      padding.right = Math.max(padding.right, rect.right);
-      padding.bottom = Math.max(padding.bottom, rect.bottom);
+      Drawable drawable = mLayers[i];
+      if (drawable != null) {
+        drawable.getPadding(rect);
+        padding.left = Math.max(padding.left, rect.left);
+        padding.top = Math.max(padding.top, rect.top);
+        padding.right = Math.max(padding.right, rect.right);
+        padding.bottom = Math.max(padding.bottom, rect.bottom);
+      }
     }
     return true;
   }
@@ -179,7 +211,10 @@ public class ArrayDrawable extends Drawable
   @Override
   public Drawable mutate() {
     for (int i = 0; i < mLayers.length; i++) {
-      mLayers[i].mutate();
+      Drawable drawable = mLayers[i];
+      if (drawable != null) {
+        drawable.mutate();
+      }
     }
     mIsMutated = true;
     return this;
@@ -190,9 +225,12 @@ public class ArrayDrawable extends Drawable
     if (mLayers.length == 0) {
       return PixelFormat.TRANSPARENT;
     }
-    int opacity = mLayers[0].getOpacity();
+    int opacity = PixelFormat.OPAQUE;
     for (int i = 1; i < mLayers.length; i++) {
-      opacity = Drawable.resolveOpacity(opacity, mLayers[i].getOpacity());
+      Drawable drawable = mLayers[i];
+      if (drawable != null) {
+        opacity = Drawable.resolveOpacity(opacity, drawable.getOpacity());
+      }
     }
     return opacity;
   }
@@ -201,7 +239,10 @@ public class ArrayDrawable extends Drawable
   public void setAlpha(int alpha) {
     mDrawableProperties.setAlpha(alpha);
     for (int i = 0; i < mLayers.length; i++) {
-      mLayers[i].setAlpha(alpha);
+      Drawable drawable = mLayers[i];
+      if (drawable != null) {
+        drawable.setAlpha(alpha);
+      }
     }
   }
 
@@ -209,7 +250,10 @@ public class ArrayDrawable extends Drawable
   public void setColorFilter(ColorFilter colorFilter) {
     mDrawableProperties.setColorFilter(colorFilter);
     for (int i = 0; i < mLayers.length; i++) {
-      mLayers[i].setColorFilter(colorFilter);
+      Drawable drawable = mLayers[i];
+      if (drawable != null) {
+        drawable.setColorFilter(colorFilter);
+      }
     }
   }
 
@@ -217,7 +261,10 @@ public class ArrayDrawable extends Drawable
   public void setDither(boolean dither) {
     mDrawableProperties.setDither(dither);
     for (int i = 0; i < mLayers.length; i++) {
-      mLayers[i].setDither(dither);
+      Drawable drawable = mLayers[i];
+      if (drawable != null) {
+        drawable.setDither(dither);
+      }
     }
   }
 
@@ -225,7 +272,10 @@ public class ArrayDrawable extends Drawable
   public void setFilterBitmap(boolean filterBitmap) {
     mDrawableProperties.setFilterBitmap(filterBitmap);
     for (int i = 0; i < mLayers.length; i++) {
-      mLayers[i].setFilterBitmap(filterBitmap);
+      Drawable drawable = mLayers[i];
+      if (drawable != null) {
+        drawable.setFilterBitmap(filterBitmap);
+      }
     }
   }
 
@@ -233,9 +283,38 @@ public class ArrayDrawable extends Drawable
   public boolean setVisible(boolean visible, boolean restart) {
     boolean changed = super.setVisible(visible, restart);
     for (int i = 0; i < mLayers.length; i++) {
-      mLayers[i].setVisible(visible, restart);
+      Drawable drawable = mLayers[i];
+      if (drawable != null) {
+        drawable.setVisible(visible, restart);
+      }
     }
     return changed;
+  }
+
+  /**
+   * Gets the {@code DrawableParent} for index.
+   */
+  public DrawableParent getDrawableParentForIndex(int index) {
+    Preconditions.checkArgument(index >= 0);
+    Preconditions.checkArgument(index < mDrawableParents.length);
+    if (mDrawableParents[index] == null) {
+      mDrawableParents[index] = createDrawableParentForIndex(index);
+    }
+    return mDrawableParents[index];
+  }
+
+  private DrawableParent createDrawableParentForIndex(final int index) {
+    return new DrawableParent() {
+      @Override
+      public Drawable setDrawable(Drawable newDrawable) {
+        return ArrayDrawable.this.setDrawable(index, newDrawable);
+      }
+
+      @Override
+      public Drawable getDrawable() {
+        return ArrayDrawable.this.getDrawable(index);
+      }
+    };
   }
 
   /**
@@ -284,6 +363,17 @@ public class ArrayDrawable extends Drawable
       mTransformCallback.getRootBounds(bounds);
     } else {
       bounds.set(getBounds());
+    }
+  }
+
+  @Override
+  @TargetApi(Build.VERSION_CODES.LOLLIPOP)
+  public void setHotspot(float x, float y) {
+    for (int i = 0; i < mLayers.length; i++) {
+      Drawable drawable = mLayers[i];
+      if (drawable != null) {
+        drawable.setHotspot(x, y);
+      }
     }
   }
 }

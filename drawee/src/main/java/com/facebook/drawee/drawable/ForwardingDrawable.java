@@ -9,12 +9,14 @@
 
 package com.facebook.drawee.drawable;
 
+import android.annotation.TargetApi;
 import android.graphics.Canvas;
 import android.graphics.ColorFilter;
 import android.graphics.Matrix;
 import android.graphics.Rect;
 import android.graphics.RectF;
 import android.graphics.drawable.Drawable;
+import android.os.Build;
 
 /**
  * A forwarding drawable class - the goal is to forward (delegate) drawable functionality to an
@@ -25,8 +27,8 @@ import android.graphics.drawable.Drawable;
  * like DrawableContainer, LevelListDrawable etc. DrawableContainer is not directly subclassable,
  * and the others don't allow changing the member drawables.
  */
-public abstract class ForwardingDrawable extends Drawable
-    implements Drawable.Callback, TransformCallback, TransformAwareDrawable {
+public class ForwardingDrawable extends Drawable
+    implements Drawable.Callback, TransformCallback, TransformAwareDrawable, DrawableParent {
 
   /** The current drawable to be drawn by this drawable when drawing is needed */
   private Drawable mCurrentDelegate;
@@ -74,7 +76,7 @@ public abstract class ForwardingDrawable extends Drawable
     DrawableUtils.setCallbacks(previousDelegate, null, null);
     DrawableUtils.setCallbacks(newDelegate, null, null);
     DrawableUtils.setDrawableProperties(newDelegate, mDrawableProperties);
-    DrawableUtils.copyProperties(newDelegate, previousDelegate);
+    DrawableUtils.copyProperties(newDelegate, this);
     DrawableUtils.setCallbacks(newDelegate, this, this);
     mCurrentDelegate = newDelegate;
     return previousDelegate;
@@ -111,12 +113,18 @@ public abstract class ForwardingDrawable extends Drawable
 
   @Override
   public boolean setVisible(boolean visible, boolean restart) {
+    super.setVisible(visible, restart);
     return mCurrentDelegate.setVisible(visible, restart);
   }
 
   @Override
   protected void onBoundsChange(Rect bounds) {
     mCurrentDelegate.setBounds(bounds);
+  }
+
+  @Override
+  public ConstantState getConstantState() {
+    return mCurrentDelegate.getConstantState();
   }
 
   @Override
@@ -165,9 +173,19 @@ public abstract class ForwardingDrawable extends Drawable
     return mCurrentDelegate;
   }
 
-  /**
-   * Drawable.Callback methods
-   */
+  // DrawableParent methods
+
+  @Override
+  public Drawable setDrawable(Drawable newDrawable) {
+    return setCurrent(newDrawable);
+  }
+
+  @Override
+  public Drawable getDrawable() {
+    return getCurrent();
+  }
+
+  // Drawable.Callback methods
 
   @Override
   public void invalidateDrawable(Drawable who) {
@@ -184,17 +202,14 @@ public abstract class ForwardingDrawable extends Drawable
     unscheduleSelf(what);
   }
 
-  /**
-   * TransformationCallbackSetter method
-   */
+  //  TransformAwareDrawable methods
+
   @Override
   public void setTransformCallback(TransformCallback transformCallback) {
     mTransformCallback = transformCallback;
   }
 
-  /**
-   * TransformationCallback methods
-   */
+  // TransformationCallback methods
 
   protected void getParentTransform(Matrix transform) {
     if (mTransformCallback != null) {
@@ -229,5 +244,11 @@ public abstract class ForwardingDrawable extends Drawable
     // because the parent may have to change our bounds.
     outBounds.set(getBounds());
     sTempTransform.mapRect(outBounds);
+  }
+
+  @Override
+  @TargetApi(Build.VERSION_CODES.LOLLIPOP)
+  public void setHotspot(float x, float y) {
+    mCurrentDelegate.setHotspot(x, y);
   }
 }

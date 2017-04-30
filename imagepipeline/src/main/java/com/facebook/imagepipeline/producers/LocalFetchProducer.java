@@ -13,15 +13,17 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.util.concurrent.Executor;
 
+import com.facebook.common.internal.Closeables;
+import com.facebook.common.memory.PooledByteBuffer;
+import com.facebook.common.memory.PooledByteBufferFactory;
 import com.facebook.common.references.CloseableReference;
-import com.facebook.imagepipeline.memory.PooledByteBuffer;
-import com.facebook.imagepipeline.memory.PooledByteBufferFactory;
+import com.facebook.imagepipeline.image.EncodedImage;
 import com.facebook.imagepipeline.request.ImageRequest;
 
 /**
  * Represents a local fetch producer.
  */
-public abstract class LocalFetchProducer implements Producer<CloseableReference<PooledByteBuffer>> {
+public abstract class LocalFetchProducer implements Producer<EncodedImage> {
 
   private final Executor mExecutor;
   private final PooledByteBufferFactory mPooledByteBufferFactory;
@@ -35,41 +37,34 @@ public abstract class LocalFetchProducer implements Producer<CloseableReference<
 
   @Override
   public void produceResults(
-      final Consumer<CloseableReference<PooledByteBuffer>> consumer,
+      final Consumer<EncodedImage> consumer,
       final ProducerContext producerContext) {
 
     final ProducerListener listener = producerContext.getListener();
     final String requestId = producerContext.getId();
     final ImageRequest imageRequest = producerContext.getImageRequest();
     final StatefulProducerRunnable cancellableProducerRunnable =
-        new StatefulProducerRunnable<CloseableReference<PooledByteBuffer>>(
+        new StatefulProducerRunnable<EncodedImage>(
             consumer,
             listener,
             getProducerName(),
             requestId) {
 
           @Override
-          protected CloseableReference<PooledByteBuffer> getResult() throws Exception {
-            InputStream inputStream = null;
-            try {
-              inputStream = getInputStream(imageRequest);
-              int length = getLength(imageRequest);
-              if (length < 0) {
-                return CloseableReference.of(mPooledByteBufferFactory.newByteBuffer(inputStream));
-              } else {
-                return CloseableReference.of(
-                    mPooledByteBufferFactory.newByteBuffer(inputStream, length));
-              }
-            } finally {
-              if (inputStream != null) {
-                inputStream.close();
-              }
+          protected EncodedImage getResult() throws Exception {
+            EncodedImage encodedImage = getEncodedImage(imageRequest);
+            if (encodedImage == null) {
+              listener.onUltimateProducerReached(requestId, getProducerName(), false);
+              return null;
             }
+            encodedImage.parseMetaData();
+            listener.onUltimateProducerReached(requestId, getProducerName(), true);
+            return encodedImage;
           }
 
           @Override
-          protected void disposeResult(CloseableReference<PooledByteBuffer> result) {
-            CloseableReference.closeSafely(result);
+          protected void disposeResult(EncodedImage result) {
+            EncodedImage.closeSafely(result);
           }
         };
 
@@ -83,19 +78,37 @@ public abstract class LocalFetchProducer implements Producer<CloseableReference<
     mExecutor.execute(cancellableProducerRunnable);
   }
 
+  /** Creates a memory-backed encoded image from the stream. The stream is closed. */
+  protected EncodedImage getByteBufferBackedEncodedImage(
+      InputStream inputStream,
+      int length) throws IOException {
+    CloseableReference<PooledByteBuffer> ref = null;
+    try {
+      if (length <= 0) {
+        ref = CloseableReference.of(mPooledByteBufferFactory.newByteBuffer(inputStream));
+      } else {
+        ref = CloseableReference.of(mPooledByteBufferFactory.newByteBuffer(inputStream, length));
+      }
+      return new EncodedImage(ref);
+    } finally {
+      Closeables.closeQuietly(inputStream);
+      CloseableReference.closeSafely(ref);
+    }
+  }
+
+  protected EncodedImage getEncodedImage(
+      InputStream inputStream,
+      int length) throws IOException {
+    return getByteBufferBackedEncodedImage(inputStream, length);
+  }
+
   /**
-   * Gets an input stream from the local resource.
+   * Gets an encoded image from the local resource. It can be either backed by a FileInputStream or
+   * a PooledByteBuffer
    * @param imageRequest request that includes the local resource that is being accessed
    * @throws IOException
    */
-  protected abstract InputStream getInputStream(ImageRequest imageRequest) throws IOException;
-
-  /**
-   * Gets the length of the input from the payload.
-   * @param imageRequest request that includes the local resource that is being accessed
-   * @return length of the input indicated by the payload. -1 indicates that the length is unknown.
-   */
-  protected abstract int getLength(ImageRequest imageRequest);
+  protected abstract EncodedImage getEncodedImage(ImageRequest imageRequest) throws IOException;
 
   /**
    * @return name of the Producer

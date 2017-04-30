@@ -19,7 +19,7 @@ import android.provider.MediaStore;
 import com.facebook.common.internal.ImmutableMap;
 import com.facebook.common.internal.VisibleForTesting;
 import com.facebook.common.references.CloseableReference;
-import com.facebook.common.references.ResourceReleaser;
+import com.facebook.imagepipeline.bitmaps.SimpleBitmapReleaser;
 import com.facebook.imagepipeline.image.CloseableImage;
 import com.facebook.imagepipeline.image.CloseableStaticBitmap;
 import com.facebook.imagepipeline.image.ImmutableQualityInfo;
@@ -34,7 +34,7 @@ import com.facebook.imagepipeline.request.ImageRequest;
 public class LocalVideoThumbnailProducer implements
     Producer<CloseableReference<CloseableImage>> {
 
-  @VisibleForTesting static final String PRODUCER_NAME = "VideoThumbnailProducer";
+  public static final String PRODUCER_NAME = "VideoThumbnailProducer";
   @VisibleForTesting static final String CREATED_THUMBNAIL = "createdThumbnail";
 
   private final Executor mExecutor;
@@ -58,6 +58,18 @@ public class LocalVideoThumbnailProducer implements
             PRODUCER_NAME,
             requestId) {
           @Override
+          protected void onSuccess(CloseableReference<CloseableImage> result) {
+            super.onSuccess(result);
+            listener.onUltimateProducerReached(requestId, PRODUCER_NAME, result != null);
+          }
+
+          @Override
+          protected void onFailure(Exception e) {
+            super.onFailure(e);
+            listener.onUltimateProducerReached(requestId, PRODUCER_NAME, false);
+          }
+
+          @Override
           protected CloseableReference<CloseableImage> getResult() throws Exception {
             Bitmap thumbnailBitmap = ThumbnailUtils.createVideoThumbnail(
                 imageRequest.getSourceFile().getPath(),
@@ -69,13 +81,9 @@ public class LocalVideoThumbnailProducer implements
             return CloseableReference.<CloseableImage>of(
                 new CloseableStaticBitmap(
                     thumbnailBitmap,
-                    new ResourceReleaser<Bitmap>() {
-                      @Override
-                      public void release(Bitmap value) {
-                        value.recycle();
-                      }
-                    },
-                    ImmutableQualityInfo.FULL_QUALITY));
+                    SimpleBitmapReleaser.getInstance(),
+                    ImmutableQualityInfo.FULL_QUALITY,
+                    0));
           }
 
           @Override

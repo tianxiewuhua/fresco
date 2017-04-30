@@ -16,9 +16,26 @@ import java.io.File;
 
 import android.net.Uri;
 
+import com.facebook.common.internal.Objects;
+import com.facebook.common.media.MediaUtils;
+import com.facebook.common.util.UriUtil;
 import com.facebook.imagepipeline.common.ImageDecodeOptions;
 import com.facebook.imagepipeline.common.Priority;
 import com.facebook.imagepipeline.common.ResizeOptions;
+import com.facebook.imagepipeline.common.RotationOptions;
+import com.facebook.imagepipeline.common.SourceUriType;
+import com.facebook.imagepipeline.listener.RequestListener;
+import com.facebook.imageutils.BitmapUtil;
+
+import static com.facebook.imagepipeline.common.SourceUriType.SOURCE_TYPE_DATA;
+import static com.facebook.imagepipeline.common.SourceUriType.SOURCE_TYPE_LOCAL_ASSET;
+import static com.facebook.imagepipeline.common.SourceUriType.SOURCE_TYPE_LOCAL_CONTENT;
+import static com.facebook.imagepipeline.common.SourceUriType.SOURCE_TYPE_LOCAL_IMAGE_FILE;
+import static com.facebook.imagepipeline.common.SourceUriType.SOURCE_TYPE_LOCAL_RESOURCE;
+import static com.facebook.imagepipeline.common.SourceUriType.SOURCE_TYPE_LOCAL_VIDEO_FILE;
+import static com.facebook.imagepipeline.common.SourceUriType.SOURCE_TYPE_NETWORK;
+import static com.facebook.imagepipeline.common.SourceUriType.SOURCE_TYPE_QUALIFIED_RESOURCE;
+import static com.facebook.imagepipeline.common.SourceUriType.SOURCE_TYPE_UNKNOWN;
 
 /**
  * Immutable object encapsulating everything pipeline has to know about requested image to proceed.
@@ -26,11 +43,16 @@ import com.facebook.imagepipeline.common.ResizeOptions;
 @Immutable
 public class ImageRequest {
 
-  /** image type */
-  private final ImageType mImageType;
+  /** Cache choice */
+  private final CacheChoice mCacheChoice;
 
   /** Source Uri */
   private final Uri mSourceUri;
+
+  private final @SourceUriType int mSourceUriType;
+
+  /** Media variations - useful for potentially providing fallback to an alternative cached image */
+  private final @Nullable MediaVariations mMediaVariations;
 
   /** Source File - for local fetches only, lazily initialized */
   private File mSourceFile;
@@ -44,11 +66,10 @@ public class ImageRequest {
   private final ImageDecodeOptions mImageDecodeOptions;
 
   /** resize options */
-  @Nullable
-  ResizeOptions mResizeOptions = null;
+  private final @Nullable ResizeOptions mResizeOptions;
 
-  /** Is auto-rotate enabled? */
-  private final boolean mAutoRotateEnabled;
+  /** rotation options */
+  private final RotationOptions mRotationOptions;
 
   /** Priority levels of this request. */
   private final Priority mRequestPriority;
@@ -62,6 +83,13 @@ public class ImageRequest {
   /** Postprocessor to run on the output bitmap. */
   private final Postprocessor mPostprocessor;
 
+  /** Request listener to use for this image request */
+  private final @Nullable RequestListener mRequestListener;
+
+  public static ImageRequest fromFile(@Nullable File file) {
+    return (file == null) ? null : ImageRequest.fromUri(UriUtil.getUriForFile(file));
+  }
+
   public static ImageRequest fromUri(@Nullable Uri uri) {
     return (uri == null) ? null : ImageRequestBuilder.newBuilderWithSource(uri).build();
   }
@@ -71,8 +99,10 @@ public class ImageRequest {
   }
 
   protected ImageRequest(ImageRequestBuilder builder) {
-    mImageType = builder.getImageType();
+    mCacheChoice = builder.getCacheChoice();
     mSourceUri = builder.getSourceUri();
+    mSourceUriType = getSourceUriType(mSourceUri);
+    mMediaVariations = builder.getMediaVariations();
 
     mProgressiveRenderingEnabled = builder.isProgressiveRenderingEnabled();
     mLocalThumbnailPreviewsEnabled = builder.isLocalThumbnailPreviewsEnabled();
@@ -80,41 +110,60 @@ public class ImageRequest {
     mImageDecodeOptions = builder.getImageDecodeOptions();
 
     mResizeOptions = builder.getResizeOptions();
-    mAutoRotateEnabled = builder.isAutoRotateEnabled();
+    mRotationOptions = builder.getRotationOptions() == null
+        ? RotationOptions.autoRotate() : builder.getRotationOptions();
 
     mRequestPriority = builder.getRequestPriority();
     mLowestPermittedRequestLevel = builder.getLowestPermittedRequestLevel();
     mIsDiskCacheEnabled = builder.isDiskCacheEnabled();
 
     mPostprocessor = builder.getPostprocessor();
+
+    mRequestListener = builder.getRequestListener();
   }
 
-  public ImageType getImageType() {
-    return mImageType;
+  public CacheChoice getCacheChoice() {
+    return mCacheChoice;
   }
 
   public Uri getSourceUri() {
     return mSourceUri;
   }
 
+  public @SourceUriType int getSourceUriType() {
+    return mSourceUriType;
+  }
+
+  public @Nullable MediaVariations getMediaVariations() {
+    return mMediaVariations;
+  }
+
   public int getPreferredWidth() {
-    return (mResizeOptions != null) ? mResizeOptions.width : -1;
+    return (mResizeOptions != null) ? mResizeOptions.width : (int) BitmapUtil.MAX_BITMAP_SIZE;
   }
 
   public int getPreferredHeight() {
-    return (mResizeOptions != null) ? mResizeOptions.height : -1;
+    return (mResizeOptions != null) ? mResizeOptions.height : (int) BitmapUtil.MAX_BITMAP_SIZE;
   }
 
   public @Nullable ResizeOptions getResizeOptions() {
     return mResizeOptions;
   }
 
-  public ImageDecodeOptions getImageDecodeOptions() {
-    return mImageDecodeOptions;
+  public RotationOptions getRotationOptions() {
+    return mRotationOptions;
   }
 
+  /**
+   * @deprecated Use {@link #getRotationOptions()}
+   */
+  @Deprecated
   public boolean getAutoRotateEnabled() {
-    return mAutoRotateEnabled;
+    return mRotationOptions.useImageMetadata();
+  }
+
+  public ImageDecodeOptions getImageDecodeOptions() {
+    return mImageDecodeOptions;
   }
 
   public boolean getProgressiveRenderingEnabled() {
@@ -148,15 +197,51 @@ public class ImageRequest {
     return mPostprocessor;
   }
 
+  public @Nullable RequestListener getRequestListener() {
+    return mRequestListener;
+  }
+
+  @Override
+  public boolean equals(Object o) {
+    if (!(o instanceof ImageRequest)) {
+      return false;
+    }
+    ImageRequest request = (ImageRequest) o;
+    return Objects.equal(mSourceUri, request.mSourceUri) &&
+        Objects.equal(mCacheChoice, request.mCacheChoice) &&
+        Objects.equal(mMediaVariations, request.mMediaVariations) &&
+        Objects.equal(mSourceFile, request.mSourceFile);
+  }
+
+  @Override
+  public int hashCode() {
+    return Objects.hashCode(mCacheChoice, mSourceUri, mMediaVariations, mSourceFile);
+  }
+
+  @Override
+  public String toString() {
+    return Objects.toStringHelper(this)
+        .add("uri", mSourceUri)
+        .add("cacheChoice", mCacheChoice)
+        .add("decodeOptions", mImageDecodeOptions)
+        .add("postprocessor", mPostprocessor)
+        .add("priority", mRequestPriority)
+        .add("resizeOptions", mResizeOptions)
+        .add("rotationOptions", mRotationOptions)
+        .add("mediaVariations", mMediaVariations)
+        .toString();
+  }
+
   /**
-   * An enum describing type of the image.
+   * An enum describing the cache choice.
    */
-  public enum ImageType {
+  public enum CacheChoice {
+
     /* Indicates that this image should go in the small disk cache, if one is being used */
     SMALL,
 
     /* Default */
-    DEFAULT,
+    DEFAULT
   }
 
   /**
@@ -188,6 +273,38 @@ public class ImageRequest {
 
     public static RequestLevel getMax(RequestLevel requestLevel1, RequestLevel requestLevel2) {
       return requestLevel1.getValue() > requestLevel2.getValue() ? requestLevel1 : requestLevel2;
+    }
+  }
+
+  /**
+   * This is a utility method which returns the type of Uri
+   * @param uri The Uri to test
+   * @return The type of the given Uri if available or SOURCE_TYPE_UNKNOWN if not
+   */
+  private static @SourceUriType int getSourceUriType(final Uri uri) {
+    if (uri == null) {
+      return SOURCE_TYPE_UNKNOWN;
+    }
+    if (UriUtil.isNetworkUri(uri)) {
+      return SOURCE_TYPE_NETWORK;
+    } else if (UriUtil.isLocalFileUri(uri)) {
+      if (MediaUtils.isVideo(MediaUtils.extractMime(uri.getPath()))) {
+        return SOURCE_TYPE_LOCAL_VIDEO_FILE;
+      } else {
+        return SOURCE_TYPE_LOCAL_IMAGE_FILE;
+      }
+    } else if (UriUtil.isLocalContentUri(uri)) {
+      return SOURCE_TYPE_LOCAL_CONTENT;
+    } else if (UriUtil.isLocalAssetUri(uri)) {
+      return SOURCE_TYPE_LOCAL_ASSET;
+    } else if (UriUtil.isLocalResourceUri(uri)) {
+      return SOURCE_TYPE_LOCAL_RESOURCE;
+    } else if (UriUtil.isDataUri(uri)) {
+      return SOURCE_TYPE_DATA;
+    } else if (UriUtil.isQualifiedResourceUri(uri))  {
+      return SOURCE_TYPE_QUALIFIED_RESOURCE;
+    } else {
+      return SOURCE_TYPE_UNKNOWN;
     }
   }
 }

@@ -11,16 +11,16 @@ package com.facebook.common.media;
 
 import android.webkit.MimeTypeMap;
 
-import com.facebook.testing.robolectric.v2.WithTestDefaultsRunner;
+import org.robolectric.RobolectricTestRunner;
 
 import org.junit.Test;
 import org.junit.runner.RunWith;
-import org.robolectric.Robolectric;
+import org.robolectric.Shadows;
 import org.robolectric.shadows.ShadowMimeTypeMap;
 
 import static org.fest.assertions.api.Assertions.assertThat;
 
-@RunWith(WithTestDefaultsRunner.class)
+@RunWith(RobolectricTestRunner.class)
 public class MediaUtilsTest {
 
   @Test
@@ -61,7 +61,7 @@ public class MediaUtilsTest {
 
   @Test
   public void testExtractMimeNativelySupportedFileExtension() {
-    ShadowMimeTypeMap mimeTypeMap = Robolectric.shadowOf(MimeTypeMap.getSingleton());
+    ShadowMimeTypeMap mimeTypeMap = Shadows.shadowOf(MimeTypeMap.getSingleton());
     mimeTypeMap.addExtensionMimeTypMapping("jpg", "image/jpg");
 
     String path = "file/with/natively/supported/extension.jpg";

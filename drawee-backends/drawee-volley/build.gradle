@@ -4,8 +4,9 @@ project.group = GROUP
 version = VERSION_NAME
 
 dependencies {
+    provided "com.android.support:support-core-utils:${SUPPORT_LIB_VERSION}"
     provided "com.google.code.findbugs:jsr305:${JSR_305_VERSION}"
-    compile "com.mcxiaoke.volley:library:${VOLLEY_VERSION}"
+    compile "com.android.volley:volley:${VOLLEY_VERSION}"
 
     compile project(':drawee')
     compile project(':fbcore')
@@ -13,8 +14,8 @@ dependencies {
 apply from: rootProject.file('release.gradle')
 
 android {
-    buildToolsVersion "21.1.2"
-    compileSdkVersion 21
+    buildToolsVersion rootProject.ext.buildToolsVersion
+    compileSdkVersion rootProject.ext.compileSdkVersion
 
     packagingOptions {
         exclude 'LICENSE'
@@ -23,6 +24,10 @@ android {
         exclude 'META-INF/LICENSE.txt'
         exclude 'META-INF/NOTICE'
         exclude 'META-INF/NOTICE.txt'
+    }
+
+    lintOptions {
+        abortOnError false
     }
 }
 

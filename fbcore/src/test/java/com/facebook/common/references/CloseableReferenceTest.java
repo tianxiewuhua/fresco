@@ -11,20 +11,31 @@ package com.facebook.common.references;
 
 import java.io.Closeable;
 import java.io.IOException;
-
-import com.facebook.testing.robolectric.v2.WithTestDefaultsRunner;
+import java.util.Arrays;
+import java.util.Collection;
 
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.mockito.Mockito;
+import org.robolectric.ParameterizedRobolectricTestRunner;
+import org.robolectric.ParameterizedRobolectricTestRunner.Parameters;
 
 /**
  * Basic tests for shared references
  */
-@RunWith(WithTestDefaultsRunner.class)
+@RunWith(ParameterizedRobolectricTestRunner.class)
 public class CloseableReferenceTest {
+
+  @Parameters
+  public static Collection<Object[]> parameters() {
+    return Arrays.asList(new Object[][]{{true}, {false}});
+  }
+
+  public CloseableReferenceTest(boolean useFinalizers) {
+    CloseableReference.setUseFinalizers(useFinalizers);
+  }
 
   private Closeable mMockCloseable;
   private CloseableReference<Closeable> mCloseableReference;

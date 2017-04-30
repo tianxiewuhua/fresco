@@ -1,3 +1,11 @@
+/*
+ * Copyright (c) 2015-present, Facebook, Inc.
+ * All rights reserved.
+ *
+ * This source code is licensed under the BSD-style license found in the
+ * LICENSE file in the root directory of this source tree. An additional grant
+ * of patent rights can be found in the PATENTS file in the same directory.
+ */
 #include <vector>
 
 #include <stdio.h>
@@ -83,7 +91,7 @@ static void memSourceSkipInputData(j_decompress_ptr dinfo, long num_bytes) {
  * <p> libjpeg will call this callback after it reads all relevant bytes.
  * At that point of time the source can be released.
  */
-static void memSourceTermSource(j_decompress_ptr dinfo) {
+static void memSourceTermSource(j_decompress_ptr) {
   // Do not di anything extra
 }
 

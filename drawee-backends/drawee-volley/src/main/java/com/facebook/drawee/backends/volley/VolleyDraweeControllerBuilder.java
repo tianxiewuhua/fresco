@@ -14,6 +14,7 @@ import android.graphics.Bitmap;
 import android.net.Uri;
 
 import com.android.volley.toolbox.ImageLoader;
+import com.facebook.common.internal.Preconditions;
 import com.facebook.datasource.DataSource;
 import com.facebook.drawee.controller.AbstractDraweeControllerBuilder;
 import com.facebook.drawee.controller.ControllerListener;
@@ -67,13 +68,19 @@ public class VolleyDraweeControllerBuilder extends AbstractDraweeControllerBuild
   protected DataSource<Bitmap> getDataSourceForRequest(
       final Uri imageRequest,
       final Object callerContext,
-      final boolean bitmapCacheOnly) {
-    return new VolleyDataSource(mImageLoader, imageRequest, bitmapCacheOnly);
+      final CacheLevel cacheLevel) {
+    return new VolleyDataSource(mImageLoader, imageRequest, cacheLevel);
   }
 
   @Override
   public VolleyDraweeControllerBuilder setUri(Uri uri) {
     return setImageRequest(uri);
+  }
+
+  @Override
+  public VolleyDraweeControllerBuilder setUri(String uriString) {
+    Preconditions.checkNotNull(uriString);
+    return setImageRequest(Uri.parse(uriString));
   }
 
   @Override

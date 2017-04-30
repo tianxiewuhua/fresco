@@ -9,25 +9,36 @@
 
 package com.facebook.imagepipeline.producers;
 
+import javax.annotation.Nullable;
+
+import java.io.File;
+import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.util.concurrent.Executor;
 
 import android.content.ContentResolver;
+import android.database.Cursor;
 import android.net.Uri;
 import android.provider.ContactsContract;
+import android.provider.MediaStore;
 
-import com.facebook.common.internal.VisibleForTesting;
-import com.facebook.imagepipeline.memory.PooledByteBufferFactory;
+import com.facebook.common.memory.PooledByteBufferFactory;
+import com.facebook.common.util.UriUtil;
+import com.facebook.imagepipeline.image.EncodedImage;
 import com.facebook.imagepipeline.request.ImageRequest;
 
 /**
  * Represents a local content Uri fetch producer.
  */
 public class LocalContentUriFetchProducer extends LocalFetchProducer {
-  @VisibleForTesting static final String PRODUCER_NAME = "LocalContentUriFetchProducer";
-  private static final String DISPLAY_PHOTO_PATH =
-      Uri.withAppendedPath(ContactsContract.AUTHORITY_URI, "display_photo").getPath();
+
+  public static final String PRODUCER_NAME = "LocalContentUriFetchProducer";
+
+  private static final String[] PROJECTION = new String[] {
+      MediaStore.Images.Media._ID,
+      MediaStore.Images.ImageColumns.DATA
+  };
 
   private final ContentResolver mContentResolver;
 
@@ -40,28 +51,59 @@ public class LocalContentUriFetchProducer extends LocalFetchProducer {
   }
 
   @Override
-  protected InputStream getInputStream(ImageRequest imageRequest) throws IOException {
+  protected EncodedImage getEncodedImage(ImageRequest imageRequest) throws IOException {
     Uri uri = imageRequest.getSourceUri();
-    if (isContactUri(uri)) {
+    if (UriUtil.isLocalContactUri(uri)) {
+      final InputStream inputStream;
+      if (uri.toString().endsWith("/photo")) {
+        inputStream =  mContentResolver.openInputStream(uri);
+      } else {
+        inputStream = ContactsContract.Contacts.openContactPhotoInputStream(mContentResolver, uri);
+        if (inputStream == null) {
+          throw new IOException("Contact photo does not exist: " + uri);
+        }
+      }
       // If a Contact URI is provided, use the special helper to open that contact's photo.
-      return ContactsContract.Contacts.openContactPhotoInputStream(mContentResolver, uri);
+      return getEncodedImage(
+          inputStream,
+          EncodedImage.UNKNOWN_STREAM_SIZE);
     }
-    return mContentResolver.openInputStream(uri);
+
+    if (UriUtil.isLocalCameraUri(uri)) {
+      EncodedImage cameraImage = getCameraImage(uri);
+      if (cameraImage != null) {
+        return cameraImage;
+      }
+    }
+
+    return getEncodedImage(
+        mContentResolver.openInputStream(uri),
+        EncodedImage.UNKNOWN_STREAM_SIZE);
   }
 
-  /**
-   * Checks if the given URI is a general Contact URI, and not a specific display photo.
-   * @param uri the URI to check
-   * @return true if the uri is a a Contact URI, and is not already specifying a display photo.
-   */
-  private boolean isContactUri(Uri uri) {
-    return ContactsContract.AUTHORITY.equals(uri.getAuthority()) &&
-        !uri.getPath().startsWith(DISPLAY_PHOTO_PATH);
+  private @Nullable EncodedImage getCameraImage(Uri uri) throws IOException {
+    Cursor cursor = mContentResolver.query(uri, PROJECTION, null, null, null);
+    if (cursor == null) {
+      return null;
+    }
+    try {
+      if (cursor.getCount() == 0) {
+        return null;
+      }
+      cursor.moveToFirst();
+      final String pathname =
+          cursor.getString(cursor.getColumnIndex(MediaStore.Images.ImageColumns.DATA));
+      if (pathname != null) {
+        return getEncodedImage(new FileInputStream(pathname), getLength(pathname));
+      }
+    } finally {
+      cursor.close();
+    }
+    return null;
   }
 
-  @Override
-  protected int getLength(ImageRequest imageRequest) {
-    return -1;
+  private static int getLength(String pathname) {
+    return pathname == null ? -1 : (int) new File(pathname).length();
   }
 
   @Override

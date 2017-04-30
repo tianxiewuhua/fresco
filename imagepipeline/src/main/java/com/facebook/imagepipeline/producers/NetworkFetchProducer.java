@@ -18,11 +18,12 @@ import java.util.Map;
 import android.os.SystemClock;
 
 import com.facebook.common.internal.VisibleForTesting;
+import com.facebook.common.memory.ByteArrayPool;
+import com.facebook.common.memory.PooledByteBuffer;
+import com.facebook.common.memory.PooledByteBufferFactory;
+import com.facebook.common.memory.PooledByteBufferOutputStream;
 import com.facebook.common.references.CloseableReference;
-import com.facebook.imagepipeline.memory.ByteArrayPool;
-import com.facebook.imagepipeline.memory.PooledByteBuffer;
-import com.facebook.imagepipeline.memory.PooledByteBufferFactory;
-import com.facebook.imagepipeline.memory.PooledByteBufferOutputStream;
+import com.facebook.imagepipeline.image.EncodedImage;
 
 /**
  * A producer to actually fetch images from the network.
@@ -33,9 +34,9 @@ import com.facebook.imagepipeline.memory.PooledByteBufferOutputStream;
  * <p>Clients should provide an instance of {@link NetworkFetcher} to make use of their networking
  * stack. Use {@link HttpUrlConnectionNetworkFetcher} as a model.
  */
-public class NetworkFetchProducer implements Producer<CloseableReference<PooledByteBuffer>> {
+public class NetworkFetchProducer implements Producer<EncodedImage> {
 
-  @VisibleForTesting static final String PRODUCER_NAME = "NetworkFetchProducer";
+  public static final String PRODUCER_NAME = "NetworkFetchProducer";
   public static final String INTERMEDIATE_RESULT_PRODUCER_EVENT = "intermediate_result";
   private static final int READ_SIZE = 16 * 1024;
 
@@ -60,9 +61,7 @@ public class NetworkFetchProducer implements Producer<CloseableReference<PooledB
   }
 
   @Override
-  public void produceResults(
-      Consumer<CloseableReference<PooledByteBuffer>> consumer,
-      ProducerContext context) {
+  public void produceResults(Consumer<EncodedImage> consumer, ProducerContext context) {
     context.getListener()
         .onProducerStart(context.getId(), PRODUCER_NAME);
     final FetchState fetchState = mNetworkFetcher.createFetchState(consumer, context);
@@ -137,7 +136,7 @@ public class NetworkFetchProducer implements Producer<CloseableReference<PooledB
   private void maybeHandleIntermediateResult(
       PooledByteBufferOutputStream pooledOutputStream,
       FetchState fetchState) {
-    final long nowMs = SystemClock.elapsedRealtime();
+    final long nowMs = SystemClock.uptimeMillis();
     if (shouldPropagateIntermediateResults(fetchState) &&
         nowMs - fetchState.getLastIntermediateResultTimeMs() >= TIME_BETWEEN_PARTIAL_RESULTS_MS) {
       fetchState.setLastIntermediateResultTimeMs(nowMs);
@@ -151,24 +150,34 @@ public class NetworkFetchProducer implements Producer<CloseableReference<PooledB
       PooledByteBufferOutputStream pooledOutputStream,
       FetchState fetchState) {
     Map<String, String> extraMap = getExtraMap(fetchState, pooledOutputStream.size());
-    fetchState.getListener()
-        .onProducerFinishWithSuccess(fetchState.getId(), PRODUCER_NAME, extraMap);
+    ProducerListener listener = fetchState.getListener();
+    listener.onProducerFinishWithSuccess(fetchState.getId(), PRODUCER_NAME, extraMap);
+    listener.onUltimateProducerReached(fetchState.getId(), PRODUCER_NAME, true);
     notifyConsumer(pooledOutputStream, true, fetchState.getConsumer());
   }
 
   private void notifyConsumer(
       PooledByteBufferOutputStream pooledOutputStream,
       boolean isFinal,
-      Consumer<CloseableReference<PooledByteBuffer>> consumer) {
+      Consumer<EncodedImage> consumer) {
     CloseableReference<PooledByteBuffer> result =
         CloseableReference.of(pooledOutputStream.toByteBuffer());
-    consumer.onNewResult(result, isFinal);
-    CloseableReference.closeSafely(result);
+    EncodedImage encodedImage = null;
+    try {
+      encodedImage = new EncodedImage(result);
+      encodedImage.parseMetaData();
+      consumer.onNewResult(encodedImage, isFinal);
+    } finally {
+      EncodedImage.closeSafely(encodedImage);
+      CloseableReference.closeSafely(result);
+    }
   }
 
   private void onFailure(FetchState fetchState, Throwable e) {
     fetchState.getListener()
         .onProducerFinishWithFailure(fetchState.getId(), PRODUCER_NAME, e, null);
+    fetchState.getListener()
+        .onUltimateProducerReached(fetchState.getId(), PRODUCER_NAME, false);
     fetchState.getConsumer().onFailure(e);
   }
 
@@ -179,7 +188,7 @@ public class NetworkFetchProducer implements Producer<CloseableReference<PooledB
   }
 
   private boolean shouldPropagateIntermediateResults(FetchState fetchState) {
-    if (!fetchState.getContext().getImageRequest().getProgressiveRenderingEnabled()) {
+    if (!fetchState.getContext().isIntermediateResultExpected()) {
       return false;
     }
     return mNetworkFetcher.shouldPropagate(fetchState);

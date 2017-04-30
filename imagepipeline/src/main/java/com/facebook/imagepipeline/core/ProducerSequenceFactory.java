@@ -9,61 +9,77 @@
 
 package com.facebook.imagepipeline.core;
 
+import java.util.HashMap;
 import java.util.Map;
 
 import android.net.Uri;
-import android.os.Build;
-import android.util.Pair;
 
-import com.facebook.common.internal.Maps;
 import com.facebook.common.internal.Preconditions;
 import com.facebook.common.internal.VisibleForTesting;
-import com.facebook.common.media.MediaUtils;
+import com.facebook.common.memory.PooledByteBuffer;
 import com.facebook.common.references.CloseableReference;
-import com.facebook.common.util.UriUtil;
+import com.facebook.common.webp.WebpSupportStatus;
 import com.facebook.imagepipeline.image.CloseableImage;
-import com.facebook.imagepipeline.memory.PooledByteBuffer;
-import com.facebook.imagepipeline.producers.AddImageTransformMetaDataProducer;
+import com.facebook.imagepipeline.image.EncodedImage;
 import com.facebook.imagepipeline.producers.BitmapMemoryCacheKeyMultiplexProducer;
 import com.facebook.imagepipeline.producers.BitmapMemoryCacheProducer;
-import com.facebook.imagepipeline.producers.BranchOnSeparateImagesProducer;
 import com.facebook.imagepipeline.producers.DecodeProducer;
 import com.facebook.imagepipeline.producers.EncodedMemoryCacheProducer;
-import com.facebook.imagepipeline.producers.ImageTransformMetaData;
+import com.facebook.imagepipeline.producers.QualifiedResourceFetchProducer;
 import com.facebook.imagepipeline.producers.LocalAssetFetchProducer;
 import com.facebook.imagepipeline.producers.LocalContentUriFetchProducer;
-import com.facebook.imagepipeline.producers.LocalExifThumbnailProducer;
 import com.facebook.imagepipeline.producers.LocalFileFetchProducer;
 import com.facebook.imagepipeline.producers.LocalResourceFetchProducer;
 import com.facebook.imagepipeline.producers.LocalVideoThumbnailProducer;
 import com.facebook.imagepipeline.producers.NetworkFetcher;
+import com.facebook.imagepipeline.producers.PostprocessedBitmapMemoryCacheProducer;
 import com.facebook.imagepipeline.producers.PostprocessorProducer;
 import com.facebook.imagepipeline.producers.Producer;
-import com.facebook.imagepipeline.producers.ResizeAndRotateProducer;
+import com.facebook.imagepipeline.producers.RemoveImageTransformMetaDataProducer;
 import com.facebook.imagepipeline.producers.SwallowResultProducer;
 import com.facebook.imagepipeline.producers.ThreadHandoffProducer;
+import com.facebook.imagepipeline.producers.ThreadHandoffProducerQueue;
 import com.facebook.imagepipeline.producers.ThrottlingProducer;
+import com.facebook.imagepipeline.producers.ThumbnailBranchProducer;
+import com.facebook.imagepipeline.producers.ThumbnailProducer;
 import com.facebook.imagepipeline.request.ImageRequest;
 
+import static com.facebook.imagepipeline.common.SourceUriType.SOURCE_TYPE_DATA;
+import static com.facebook.imagepipeline.common.SourceUriType.SOURCE_TYPE_LOCAL_ASSET;
+import static com.facebook.imagepipeline.common.SourceUriType.SOURCE_TYPE_LOCAL_CONTENT;
+import static com.facebook.imagepipeline.common.SourceUriType.SOURCE_TYPE_LOCAL_IMAGE_FILE;
+import static com.facebook.imagepipeline.common.SourceUriType.SOURCE_TYPE_LOCAL_RESOURCE;
+import static com.facebook.imagepipeline.common.SourceUriType.SOURCE_TYPE_LOCAL_VIDEO_FILE;
+import static com.facebook.imagepipeline.common.SourceUriType.SOURCE_TYPE_NETWORK;
+import static com.facebook.imagepipeline.common.SourceUriType.SOURCE_TYPE_QUALIFIED_RESOURCE;
+
 public class ProducerSequenceFactory {
-  private static final int MAX_SIMULTANEOUS_FILE_FETCH_AND_RESIZE = 5;
 
   private final ProducerFactory mProducerFactory;
   private final NetworkFetcher mNetworkFetcher;
   private final boolean mResizeAndRotateEnabledForNetwork;
+  private final boolean mWebpSupportEnabled;
+  private final ThreadHandoffProducerQueue mThreadHandoffProducerQueue;
+  private final boolean mUseDownsamplingRatio;
 
   // Saved sequences
   @VisibleForTesting Producer<CloseableReference<CloseableImage>> mNetworkFetchSequence;
+  @VisibleForTesting Producer<EncodedImage> mBackgroundLocalFileFetchToEncodedMemorySequence;
+  @VisibleForTesting Producer<EncodedImage> mBackgroundNetworkFetchToEncodedMemorySequence;
   @VisibleForTesting Producer<CloseableReference<PooledByteBuffer>>
-      mBackgroundNetworkFetchToEncodedMemorySequence;
+      mLocalFileEncodedImageProducerSequence;
+  @VisibleForTesting Producer<CloseableReference<PooledByteBuffer>>
+      mNetworkEncodedImageProducerSequence;
+  @VisibleForTesting Producer<Void> mLocalFileFetchToEncodedMemoryPrefetchSequence;
   @VisibleForTesting Producer<Void> mNetworkFetchToEncodedMemoryPrefetchSequence;
-  private Producer<CloseableReference<PooledByteBuffer>>
-      mCommonNetworkFetchToEncodedMemorySequence;
+  private Producer<EncodedImage> mCommonNetworkFetchToEncodedMemorySequence;
   @VisibleForTesting Producer<CloseableReference<CloseableImage>> mLocalImageFileFetchSequence;
   @VisibleForTesting Producer<CloseableReference<CloseableImage>> mLocalVideoFileFetchSequence;
   @VisibleForTesting Producer<CloseableReference<CloseableImage>> mLocalContentUriFetchSequence;
   @VisibleForTesting Producer<CloseableReference<CloseableImage>> mLocalResourceFetchSequence;
   @VisibleForTesting Producer<CloseableReference<CloseableImage>> mLocalAssetFetchSequence;
+  @VisibleForTesting Producer<CloseableReference<CloseableImage>> mDataFetchSequence;
+  @VisibleForTesting Producer<CloseableReference<CloseableImage>> mQualifiedResourceFetchSequence;
   @VisibleForTesting Map<
       Producer<CloseableReference<CloseableImage>>,
       Producer<CloseableReference<CloseableImage>>>
@@ -74,16 +90,23 @@ public class ProducerSequenceFactory {
   public ProducerSequenceFactory(
       ProducerFactory producerFactory,
       NetworkFetcher networkFetcher,
-      boolean resizeAndRotateEnabledForNetwork) {
+      boolean resizeAndRotateEnabledForNetwork,
+      boolean webpSupportEnabled,
+      ThreadHandoffProducerQueue threadHandoffProducerQueue,
+      boolean useDownsamplingRatio) {
     mProducerFactory = producerFactory;
     mNetworkFetcher = networkFetcher;
     mResizeAndRotateEnabledForNetwork = resizeAndRotateEnabledForNetwork;
-    mPostprocessorSequences = Maps.newHashMap();
-    mCloseableImagePrefetchSequences = Maps.newHashMap();
+    mWebpSupportEnabled = webpSupportEnabled;
+    mPostprocessorSequences = new HashMap<>();
+    mCloseableImagePrefetchSequences = new HashMap<>();
+    mThreadHandoffProducerQueue = threadHandoffProducerQueue;
+    mUseDownsamplingRatio = useDownsamplingRatio;
   }
 
   /**
-   * Returns a sequence that can be used for a request for an encoded image.
+   * Returns a sequence that can be used for a request for an encoded image from either network or
+   * local files.
    *
    * @param imageRequest the request that will be submitted
    * @return the sequence that should be used to process the request
@@ -91,7 +114,47 @@ public class ProducerSequenceFactory {
   public Producer<CloseableReference<PooledByteBuffer>> getEncodedImageProducerSequence(
       ImageRequest imageRequest) {
     validateEncodedImageRequest(imageRequest);
-    return getBackgroundNetworkFetchToEncodedMemorySequence();
+    final Uri uri = imageRequest.getSourceUri();
+
+    switch (imageRequest.getSourceUriType()) {
+      case SOURCE_TYPE_NETWORK:
+        return getNetworkFetchEncodedImageProducerSequence();
+      case SOURCE_TYPE_LOCAL_VIDEO_FILE:
+      case SOURCE_TYPE_LOCAL_IMAGE_FILE:
+        return getLocalFileFetchEncodedImageProducerSequence();
+      default:
+        throw new IllegalArgumentException(
+            "Unsupported uri scheme for encoded image fetch! Uri is: "
+                + getShortenedUriString(uri));
+    }
+  }
+
+  /**
+   * Returns a sequence that can be used for a request for an encoded image from network.
+   */
+  public Producer<CloseableReference<PooledByteBuffer>>
+  getNetworkFetchEncodedImageProducerSequence() {
+    synchronized (this) {
+      if (mNetworkEncodedImageProducerSequence == null) {
+        mNetworkEncodedImageProducerSequence = new RemoveImageTransformMetaDataProducer(
+            getBackgroundNetworkFetchToEncodedMemorySequence());
+      }
+    }
+    return mNetworkEncodedImageProducerSequence;
+  }
+
+  /**
+   * Returns a sequence that can be used for a request for an encoded image from a local file.
+   */
+  public Producer<CloseableReference<PooledByteBuffer>>
+  getLocalFileFetchEncodedImageProducerSequence() {
+    synchronized (this) {
+      if (mLocalFileEncodedImageProducerSequence == null) {
+        mLocalFileEncodedImageProducerSequence = new RemoveImageTransformMetaDataProducer(
+            getBackgroundLocalFileFetchToEncodeMemorySequence());
+      }
+    }
+    return mLocalFileEncodedImageProducerSequence;
   }
 
   /**
@@ -105,12 +168,23 @@ public class ProducerSequenceFactory {
    */
   public Producer<Void> getEncodedImagePrefetchProducerSequence(ImageRequest imageRequest) {
     validateEncodedImageRequest(imageRequest);
-    return getNetworkFetchToEncodedMemoryPrefetchSequence();
+
+    switch (imageRequest.getSourceUriType()) {
+      case SOURCE_TYPE_NETWORK:
+        return getNetworkFetchToEncodedMemoryPrefetchSequence();
+      case SOURCE_TYPE_LOCAL_VIDEO_FILE:
+      case SOURCE_TYPE_LOCAL_IMAGE_FILE:
+        return getLocalFileFetchToEncodedMemoryPrefetchSequence();
+      default:
+        final Uri uri = imageRequest.getSourceUri();
+        throw new IllegalArgumentException(
+            "Unsupported uri scheme for encoded image fetch! Uri is: "
+                + getShortenedUriString(uri));
+    }
   }
 
   private static void validateEncodedImageRequest(ImageRequest imageRequest) {
     Preconditions.checkNotNull(imageRequest);
-    Preconditions.checkArgument(UriUtil.isNetworkUri(imageRequest.getSourceUri()));
     Preconditions.checkArgument(
         imageRequest.getLowestPermittedRequestLevel().getValue() <=
             ImageRequest.RequestLevel.ENCODED_MEMORY_CACHE.getValue());
@@ -150,31 +224,32 @@ public class ProducerSequenceFactory {
 
     Uri uri = imageRequest.getSourceUri();
     Preconditions.checkNotNull(uri, "Uri is null.");
-    if (UriUtil.isNetworkUri(uri)) {
-      return getNetworkFetchSequence();
-    } else if (UriUtil.isLocalFileUri(uri)) {
-      if (MediaUtils.isVideo(MediaUtils.extractMime(uri.getPath()))) {
+
+    switch (imageRequest.getSourceUriType()) {
+      case SOURCE_TYPE_NETWORK:
+        return getNetworkFetchSequence();
+      case SOURCE_TYPE_LOCAL_VIDEO_FILE:
         return getLocalVideoFileFetchSequence();
-      } else {
+      case SOURCE_TYPE_LOCAL_IMAGE_FILE:
         return getLocalImageFileFetchSequence();
-      }
-    } else if (UriUtil.isLocalContentUri(uri)) {
-      return getLocalContentUriFetchSequence();
-    } else if (UriUtil.isLocalAssetUri(uri)) {
-      return getLocalAssetFetchSequence();
-    } else if (UriUtil.isLocalResourceUri(uri)) {
-      return getLocalResourceFetchSequence();
-    } else {
-      String uriString = uri.toString();
-      if (uriString.length() > 30) {
-        uriString = uriString.substring(0, 30) + "...";
-      }
-      throw new RuntimeException("Unsupported uri scheme! Uri is: " + uriString);
+      case SOURCE_TYPE_LOCAL_CONTENT:
+        return getLocalContentUriFetchSequence();
+      case SOURCE_TYPE_LOCAL_ASSET:
+        return getLocalAssetFetchSequence();
+      case SOURCE_TYPE_LOCAL_RESOURCE:
+        return getLocalResourceFetchSequence();
+      case SOURCE_TYPE_QUALIFIED_RESOURCE:
+        return getQualifiedResourceFetchSequence();
+      case SOURCE_TYPE_DATA:
+        return getDataFetchSequence();
+      default:
+        throw new IllegalArgumentException(
+            "Unsupported uri scheme! Uri is: " + getShortenedUriString(uri));
     }
   }
 
   /**
-   * swallow result if prefetch -> bitmap cache get -> wait if scrolling ->
+   * swallow result if prefetch -> bitmap cache get ->
    * background thread hand-off -> multiplex -> bitmap cache -> decode -> multiplex ->
    * encoded cache -> disk cache -> (webp transcode) -> network fetch.
    */
@@ -190,13 +265,13 @@ public class ProducerSequenceFactory {
    * background-thread hand-off -> multiplex -> encoded cache ->
    * disk cache -> (webp transcode) -> network fetch.
    */
-  private synchronized Producer<CloseableReference<PooledByteBuffer>>
-      getBackgroundNetworkFetchToEncodedMemorySequence() {
+  private synchronized Producer<EncodedImage> getBackgroundNetworkFetchToEncodedMemorySequence() {
     if (mBackgroundNetworkFetchToEncodedMemorySequence == null) {
       // Use hand-off producer to ensure that we don't do any unnecessary work on the UI thread.
       mBackgroundNetworkFetchToEncodedMemorySequence =
           mProducerFactory.newBackgroundThreadHandoffProducer(
-              getCommonNetworkFetchToEncodedMemorySequence());
+              getCommonNetworkFetchToEncodedMemorySequence(),
+              mThreadHandoffProducerQueue);
     }
     return mBackgroundNetworkFetchToEncodedMemorySequence;
   }
@@ -208,7 +283,7 @@ public class ProducerSequenceFactory {
   private synchronized Producer<Void> getNetworkFetchToEncodedMemoryPrefetchSequence() {
     if (mNetworkFetchToEncodedMemoryPrefetchSequence == null) {
       mNetworkFetchToEncodedMemoryPrefetchSequence =
-          mProducerFactory.newSwallowResultProducer(
+          ProducerFactory.newSwallowResultProducer(
               getBackgroundNetworkFetchToEncodedMemorySequence());
     }
     return mNetworkFetchToEncodedMemoryPrefetchSequence;
@@ -217,21 +292,58 @@ public class ProducerSequenceFactory {
   /**
    * multiplex -> encoded cache -> disk cache -> (webp transcode) -> network fetch.
    */
-  private synchronized Producer<CloseableReference<PooledByteBuffer>>
-      getCommonNetworkFetchToEncodedMemorySequence() {
+  private synchronized Producer<EncodedImage> getCommonNetworkFetchToEncodedMemorySequence() {
     if (mCommonNetworkFetchToEncodedMemorySequence == null) {
-      mCommonNetworkFetchToEncodedMemorySequence = newEncodedCacheMultiplexToTranscodeSequence(
-          mProducerFactory.newNetworkFetchProducer(mNetworkFetcher));
-      if (mResizeAndRotateEnabledForNetwork) {
-        mCommonNetworkFetchToEncodedMemorySequence =
-            newResizeAndRotateImagesSequence(mCommonNetworkFetchToEncodedMemorySequence);
-      }
+      Producer<EncodedImage> inputProducer =
+          newEncodedCacheMultiplexToTranscodeSequence(
+              mProducerFactory.newNetworkFetchProducer(mNetworkFetcher));
+      mCommonNetworkFetchToEncodedMemorySequence =
+          ProducerFactory.newAddImageTransformMetaDataProducer(inputProducer);
+
+      mCommonNetworkFetchToEncodedMemorySequence =
+          mProducerFactory.newResizeAndRotateProducer(
+              mCommonNetworkFetchToEncodedMemorySequence,
+              mResizeAndRotateEnabledForNetwork,
+              mUseDownsamplingRatio);
     }
     return mCommonNetworkFetchToEncodedMemorySequence;
   }
 
   /**
-   * bitmap cache get -> wait if scrolling ->
+   * swallow-result -> background-thread hand-off -> multiplex -> encoded cache ->
+   * disk cache -> (webp transcode) -> local file fetch.
+   */
+  private synchronized Producer<Void> getLocalFileFetchToEncodedMemoryPrefetchSequence() {
+    if (mLocalFileFetchToEncodedMemoryPrefetchSequence == null) {
+      mLocalFileFetchToEncodedMemoryPrefetchSequence =
+          ProducerFactory.newSwallowResultProducer(
+              getBackgroundLocalFileFetchToEncodeMemorySequence());
+    }
+    return mLocalFileFetchToEncodedMemoryPrefetchSequence;
+  }
+
+  /**
+   * background-thread hand-off -> multiplex -> encoded cache ->
+   * disk cache -> (webp transcode) -> local file fetch
+   */
+  private synchronized Producer<EncodedImage> getBackgroundLocalFileFetchToEncodeMemorySequence() {
+    if (mBackgroundLocalFileFetchToEncodedMemorySequence == null) {
+      final LocalFileFetchProducer localFileFetchProducer =
+          mProducerFactory.newLocalFileFetchProducer();
+
+      final Producer<EncodedImage> toEncodedMultiplexProducer =
+          newEncodedCacheMultiplexToTranscodeSequence(localFileFetchProducer);
+
+      mBackgroundLocalFileFetchToEncodedMemorySequence =
+          mProducerFactory.newBackgroundThreadHandoffProducer(
+              toEncodedMultiplexProducer,
+              mThreadHandoffProducerQueue);
+    }
+    return mBackgroundLocalFileFetchToEncodedMemorySequence;
+  }
+
+  /**
+   * bitmap cache get ->
    * background thread hand-off -> multiplex -> bitmap cache -> decode ->
    * branch on separate images
    *   -> exif resize and rotate -> exif thumbnail creation
@@ -239,22 +351,22 @@ public class ProducerSequenceFactory {
    *   (webp transcode) -> local file fetch.
    */
   private synchronized Producer<CloseableReference<CloseableImage>>
-      getLocalImageFileFetchSequence() {
+  getLocalImageFileFetchSequence() {
     if (mLocalImageFileFetchSequence == null) {
       LocalFileFetchProducer localFileFetchProducer =
           mProducerFactory.newLocalFileFetchProducer();
       mLocalImageFileFetchSequence =
-          newBitmapCacheGetToTranscodeSequence(localFileFetchProducer, /* isLocal */true);
+          newBitmapCacheGetToLocalTransformSequence(localFileFetchProducer);
     }
     return mLocalImageFileFetchSequence;
   }
 
   /**
-   * Bitmap cache get -> wait if scrolling -> thread hand off -> multiplex -> bitmap cache ->
+   * Bitmap cache get -> thread hand off -> multiplex -> bitmap cache ->
    * local video thumbnail
    */
   private synchronized Producer<CloseableReference<CloseableImage>>
-      getLocalVideoFileFetchSequence() {
+  getLocalVideoFileFetchSequence() {
     if (mLocalVideoFileFetchSequence == null) {
       LocalVideoThumbnailProducer localVideoThumbnailProducer =
           mProducerFactory.newLocalVideoThumbnailProducer();
@@ -265,26 +377,53 @@ public class ProducerSequenceFactory {
   }
 
   /**
-   * bitmap cache get -> wait if scrolling ->
+   * bitmap cache get ->
    * background thread hand-off -> multiplex -> bitmap cache -> decode ->
    * branch on separate images
-   *   -> exif resize and rotate -> exif thumbnail creation
+   *   -> thumbnail resize and rotate -> thumbnail branch
+   *     -> local content thumbnail creation
+   *     -> exif thumbnail creation
    *   -> local image resize and rotate -> add meta data producer -> multiplex -> encoded cache ->
    *   (webp transcode) -> local content uri fetch.
    */
   private synchronized Producer<CloseableReference<CloseableImage>>
-      getLocalContentUriFetchSequence() {
+  getLocalContentUriFetchSequence() {
     if (mLocalContentUriFetchSequence == null) {
       LocalContentUriFetchProducer localContentUriFetchProducer =
-          mProducerFactory.newContentUriFetchProducer();
-      mLocalContentUriFetchSequence =
-          newBitmapCacheGetToTranscodeSequence(localContentUriFetchProducer, /* isLocal */true);
+          mProducerFactory.newLocalContentUriFetchProducer();
+
+      ThumbnailProducer<EncodedImage>[] thumbnailProducers = new ThumbnailProducer[2];
+      thumbnailProducers[0] = mProducerFactory.newLocalContentUriThumbnailFetchProducer();
+      thumbnailProducers[1] = mProducerFactory.newLocalExifThumbnailProducer();
+
+      mLocalContentUriFetchSequence = newBitmapCacheGetToLocalTransformSequence(
+          localContentUriFetchProducer,
+          thumbnailProducers);
     }
     return mLocalContentUriFetchSequence;
   }
 
   /**
-   * bitmap cache get -> wait if scrolling ->
+   * bitmap cache get ->
+   * background thread hand-off -> multiplex -> bitmap cache -> decode ->
+   * branch on separate images
+   *   -> exif resize and rotate -> exif thumbnail creation
+   *   -> local image resize and rotate -> add meta data producer -> multiplex -> encoded cache ->
+   *   (webp transcode) -> qualified resource fetch.
+   */
+  private synchronized Producer<CloseableReference<CloseableImage>>
+  getQualifiedResourceFetchSequence() {
+    if (mQualifiedResourceFetchSequence == null) {
+      QualifiedResourceFetchProducer qualifiedResourceFetchProducer =
+          mProducerFactory.newQualifiedResourceFetchProducer();
+      mQualifiedResourceFetchSequence =
+          newBitmapCacheGetToLocalTransformSequence(qualifiedResourceFetchProducer);
+    }
+    return mQualifiedResourceFetchSequence;
+  }
+
+  /**
+   * bitmap cache get ->
    * background thread hand-off -> multiplex -> bitmap cache -> decode ->
    * branch on separate images
    *   -> exif resize and rotate -> exif thumbnail creation
@@ -292,18 +431,18 @@ public class ProducerSequenceFactory {
    *   (webp transcode) -> local resource fetch.
    */
   private synchronized Producer<CloseableReference<CloseableImage>>
-      getLocalResourceFetchSequence() {
+  getLocalResourceFetchSequence() {
     if (mLocalResourceFetchSequence == null) {
       LocalResourceFetchProducer localResourceFetchProducer =
           mProducerFactory.newLocalResourceFetchProducer();
       mLocalResourceFetchSequence =
-          newBitmapCacheGetToTranscodeSequence(localResourceFetchProducer, /* isLocal */true);
+          newBitmapCacheGetToLocalTransformSequence(localResourceFetchProducer);
     }
     return mLocalResourceFetchSequence;
   }
 
   /**
-   * bitmap cache get -> wait if scrolling ->
+   * bitmap cache get ->
    * background thread hand-off -> multiplex -> bitmap cache -> decode ->
    * branch on separate images
    *   -> exif resize and rotate -> exif thumbnail creation
@@ -315,136 +454,183 @@ public class ProducerSequenceFactory {
       LocalAssetFetchProducer localAssetFetchProducer =
           mProducerFactory.newLocalAssetFetchProducer();
       mLocalAssetFetchSequence =
-          newBitmapCacheGetToTranscodeSequence(localAssetFetchProducer, /* isLocal */true);
+          newBitmapCacheGetToLocalTransformSequence(localAssetFetchProducer);
     }
     return mLocalAssetFetchSequence;
   }
 
   /**
+   * bitmap cache get ->
+   * background thread hand-off -> bitmap cache -> decode -> resize and rotate -> (webp transcode)
+   * -> data fetch.
+   */
+  private synchronized Producer<CloseableReference<CloseableImage>> getDataFetchSequence() {
+    if (mDataFetchSequence == null) {
+      Producer<EncodedImage> inputProducer = mProducerFactory.newDataFetchProducer();
+      if (WebpSupportStatus.sIsWebpSupportRequired &&
+          (!mWebpSupportEnabled || WebpSupportStatus.sWebpBitmapFactory == null)) {
+        inputProducer = mProducerFactory.newWebpTranscodeProducer(inputProducer);
+      }
+      inputProducer = mProducerFactory.newAddImageTransformMetaDataProducer(inputProducer);
+      inputProducer = mProducerFactory.newResizeAndRotateProducer(
+          inputProducer,
+          true,
+          mUseDownsamplingRatio);
+      mDataFetchSequence = newBitmapCacheGetToDecodeSequence(inputProducer);
+    }
+    return mDataFetchSequence;
+  }
+
+  /**
    * Creates a new fetch sequence that just needs the source producer.
-   * @param nextProducer the source producer
-   * @param isLocal whether the image source is local or not
+   * @param inputProducer the source producer
    * @return the new sequence
    */
-  private Producer<CloseableReference<CloseableImage>> newBitmapCacheGetToTranscodeSequence(
-      Producer<CloseableReference<PooledByteBuffer>> nextProducer,
-      boolean isLocal) {
-    Producer<CloseableReference<PooledByteBuffer>> nextProducerAfterDecode =
-        newEncodedCacheMultiplexToTranscodeSequence(nextProducer);
-    if (isLocal) {
-      nextProducerAfterDecode = newLocalTransformationsSequence(nextProducerAfterDecode);
-    }
-    return newBitmapCacheGetToDecodeSequence(nextProducerAfterDecode);
+  private Producer<CloseableReference<CloseableImage>> newBitmapCacheGetToLocalTransformSequence(
+      Producer<EncodedImage> inputProducer) {
+    ThumbnailProducer<EncodedImage>[] defaultThumbnailProducers = new ThumbnailProducer[1];
+    defaultThumbnailProducers[0] = mProducerFactory.newLocalExifThumbnailProducer();
+    return newBitmapCacheGetToLocalTransformSequence(inputProducer, defaultThumbnailProducers);
+  }
+
+  /**
+   * Creates a new fetch sequence that just needs the source producer.
+   * @param inputProducer the source producer
+   * @param thumbnailProducers the thumbnail producers from which to request the image before
+   * falling back to the full image producer sequence
+   * @return the new sequence
+   */
+  private Producer<CloseableReference<CloseableImage>> newBitmapCacheGetToLocalTransformSequence(
+      Producer<EncodedImage> inputProducer,
+      ThumbnailProducer<EncodedImage>[] thumbnailProducers) {
+    inputProducer = newEncodedCacheMultiplexToTranscodeSequence(inputProducer);
+    Producer<EncodedImage> inputProducerAfterDecode =
+        newLocalTransformationsSequence(inputProducer, thumbnailProducers);
+    return newBitmapCacheGetToDecodeSequence(inputProducerAfterDecode);
   }
 
   /**
    * Same as {@code newBitmapCacheGetToBitmapCacheSequence} but with an extra DecodeProducer.
-   * @param nextProducer next producer in the sequence after decode
+   * @param inputProducer producer providing the input to the decode
    * @return bitmap cache get to decode sequence
    */
   private Producer<CloseableReference<CloseableImage>> newBitmapCacheGetToDecodeSequence(
-      Producer<CloseableReference<PooledByteBuffer>> nextProducer) {
-    DecodeProducer decodeProducer = mProducerFactory.newDecodeProducer(nextProducer);
+      Producer<EncodedImage> inputProducer) {
+    DecodeProducer decodeProducer = mProducerFactory.newDecodeProducer(inputProducer);
     return newBitmapCacheGetToBitmapCacheSequence(decodeProducer);
   }
 
   /**
    * encoded cache multiplex -> encoded cache -> (disk cache) -> (webp transcode)
-   * @param nextProducer next producer in the sequence
+   * @param inputProducer producer providing the input to the transcode
    * @return encoded cache multiplex to webp transcode sequence
    */
-  private Producer<CloseableReference<PooledByteBuffer>>
-      newEncodedCacheMultiplexToTranscodeSequence(
-          Producer<CloseableReference<PooledByteBuffer>> nextProducer) {
-    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.JELLY_BEAN_MR2) {
-      nextProducer = mProducerFactory.newWebpTranscodeProducer(nextProducer);
+  private Producer<EncodedImage> newEncodedCacheMultiplexToTranscodeSequence(
+      Producer<EncodedImage> inputProducer) {
+    if (WebpSupportStatus.sIsWebpSupportRequired &&
+        (!mWebpSupportEnabled || WebpSupportStatus.sWebpBitmapFactory == null)) {
+      inputProducer = mProducerFactory.newWebpTranscodeProducer(inputProducer);
     }
-    nextProducer = mProducerFactory.newDiskCacheProducer(nextProducer);
+    inputProducer = newDiskCacheSequence(inputProducer);
     EncodedMemoryCacheProducer encodedMemoryCacheProducer =
-        mProducerFactory.newEncodedMemoryCacheProducer(nextProducer);
+        mProducerFactory.newEncodedMemoryCacheProducer(inputProducer);
     return mProducerFactory.newEncodedCacheKeyMultiplexProducer(encodedMemoryCacheProducer);
   }
 
+  private Producer<EncodedImage> newDiskCacheSequence(Producer<EncodedImage> inputProducer) {
+    Producer<EncodedImage> cacheWriteProducer =
+        mProducerFactory.newDiskCacheWriteProducer(inputProducer);
+    Producer<EncodedImage> mediaVariationsProducer =
+        mProducerFactory.newMediaVariationsProducer(cacheWriteProducer);
+    return mProducerFactory.newDiskCacheReadProducer(mediaVariationsProducer);
+  }
+
   /**
-   * Bitmap cache get -> wait if scrolling -> thread hand off -> multiplex -> bitmap cache
-   * @param nextProducer next producer in the sequence after bitmap cache
+   * Bitmap cache get -> thread hand off -> multiplex -> bitmap cache
+   * @param inputProducer producer providing the input to the bitmap cache
    * @return bitmap cache get to bitmap cache sequence
    */
   private Producer<CloseableReference<CloseableImage>> newBitmapCacheGetToBitmapCacheSequence(
-      Producer<CloseableReference<CloseableImage>> nextProducer) {
+      Producer<CloseableReference<CloseableImage>> inputProducer) {
     BitmapMemoryCacheProducer bitmapMemoryCacheProducer =
-        mProducerFactory.newBitmapMemoryCacheProducer(nextProducer);
+        mProducerFactory.newBitmapMemoryCacheProducer(inputProducer);
     BitmapMemoryCacheKeyMultiplexProducer bitmapKeyMultiplexProducer =
         mProducerFactory.newBitmapMemoryCacheKeyMultiplexProducer(bitmapMemoryCacheProducer);
     ThreadHandoffProducer<CloseableReference<CloseableImage>> threadHandoffProducer =
-        mProducerFactory.newBackgroundThreadHandoffProducer(bitmapKeyMultiplexProducer);
+        mProducerFactory.newBackgroundThreadHandoffProducer(
+            bitmapKeyMultiplexProducer,
+            mThreadHandoffProducerQueue);
     return mProducerFactory.newBitmapMemoryCacheGetProducer(threadHandoffProducer);
   }
 
-  private Producer<CloseableReference<PooledByteBuffer>>
-      newResizeAndRotateImagesSequence(
-          Producer<CloseableReference<PooledByteBuffer>> nextProducer) {
-    AddImageTransformMetaDataProducer addImageTransformMetaDataProducer =
-        ProducerFactory.newAddImageTransformMetaDataProducer(nextProducer);
-    ResizeAndRotateProducer networkImageResizeAndRotateProducer =
-        mProducerFactory.newResizeAndRotateProducer(addImageTransformMetaDataProducer);
-    return ProducerFactory.newRemoveImageTransformMetaDataProducer(
-            networkImageResizeAndRotateProducer);
-  }
-
   /**
-   * Remove image transform meta data -> branch on separate images
-   *   -> exif resize and rotate -> exif thumbnail creation
+   * Branch on separate images
+   *   -> thumbnail resize and rotate -> thumbnail producers as provided
    *   -> local image resize and rotate -> add meta data producer
-   * @param nextProducer next producer in the sequence after add meta data producer
+   * @param inputProducer producer providing the input to add meta data producer
+   * @param thumbnailProducers the thumbnail producers from which to request the image before
+   * falling back to the full image producer sequence
    * @return local transformations sequence
    */
-  private Producer<CloseableReference<PooledByteBuffer>> newLocalTransformationsSequence(
-      Producer<CloseableReference<PooledByteBuffer>> nextProducer) {
-    AddImageTransformMetaDataProducer addImageTransformMetaDataProducer =
-        mProducerFactory.newAddImageTransformMetaDataProducer(nextProducer);
-    ResizeAndRotateProducer localImageResizeAndRotateProducer =
-        mProducerFactory.newResizeAndRotateProducer(addImageTransformMetaDataProducer);
-    ThrottlingProducer<Pair<CloseableReference<PooledByteBuffer>, ImageTransformMetaData>>
+  private Producer<EncodedImage> newLocalTransformationsSequence(
+      Producer<EncodedImage> inputProducer,
+      ThumbnailProducer<EncodedImage>[] thumbnailProducers) {
+    Producer<EncodedImage> localImageProducer =
+        ProducerFactory.newAddImageTransformMetaDataProducer(inputProducer);
+    localImageProducer =
+        mProducerFactory.newResizeAndRotateProducer(
+            localImageProducer,
+            true,
+            mUseDownsamplingRatio);
+    ThrottlingProducer<EncodedImage>
         localImageThrottlingProducer =
-        mProducerFactory.newThrottlingProducer(
-            MAX_SIMULTANEOUS_FILE_FETCH_AND_RESIZE,
-            localImageResizeAndRotateProducer);
-    LocalExifThumbnailProducer localExifThumbnailProducer =
-        mProducerFactory.newLocalExifThumbnailProducer();
-    ResizeAndRotateProducer exifThumbnailResizeAndRotateProducer =
-        mProducerFactory.newResizeAndRotateProducer(localExifThumbnailProducer);
-    BranchOnSeparateImagesProducer branchOnSeparateImagesProducer =
-        mProducerFactory.newBranchOnSeparateImagesProducer(
-            exifThumbnailResizeAndRotateProducer,
-            localImageThrottlingProducer);
-    return mProducerFactory.newRemoveImageTransformMetaDataProducer(branchOnSeparateImagesProducer);
+        mProducerFactory.newThrottlingProducer(localImageProducer);
+    return mProducerFactory.newBranchOnSeparateImagesProducer(
+        newLocalThumbnailProducer(thumbnailProducers),
+        localImageThrottlingProducer);
+  }
 
+  private Producer<EncodedImage> newLocalThumbnailProducer(
+      ThumbnailProducer<EncodedImage>[] thumbnailProducers) {
+    ThumbnailBranchProducer thumbnailBranchProducer =
+        mProducerFactory.newThumbnailBranchProducer(thumbnailProducers);
+
+    return mProducerFactory.newResizeAndRotateProducer(
+        thumbnailBranchProducer,
+        true,
+        mUseDownsamplingRatio);
   }
 
   /**
-   * post-processor producer -> copy producer -> next producer
+   * post-processor producer -> copy producer -> inputProducer
    */
   private synchronized Producer<CloseableReference<CloseableImage>> getPostprocessorSequence(
-      Producer<CloseableReference<CloseableImage>> nextProducer) {
-    if (!mPostprocessorSequences.containsKey(nextProducer)) {
+      Producer<CloseableReference<CloseableImage>> inputProducer) {
+    if (!mPostprocessorSequences.containsKey(inputProducer)) {
       PostprocessorProducer postprocessorProducer =
-          mProducerFactory.newPostprocessorProducer(nextProducer);
-      mPostprocessorSequences.put(nextProducer, postprocessorProducer);
+          mProducerFactory.newPostprocessorProducer(inputProducer);
+      PostprocessedBitmapMemoryCacheProducer postprocessedBitmapMemoryCacheProducer =
+          mProducerFactory.newPostprocessorBitmapMemoryCacheProducer(postprocessorProducer);
+      mPostprocessorSequences.put(inputProducer, postprocessedBitmapMemoryCacheProducer);
     }
-    return mPostprocessorSequences.get(nextProducer);
+    return mPostprocessorSequences.get(inputProducer);
   }
 
   /**
-   * swallow result producer -> next producer
+   * swallow result producer -> inputProducer
    */
   private synchronized Producer<Void> getDecodedImagePrefetchSequence(
-      Producer<CloseableReference<CloseableImage>> nextProducer) {
-    if (!mCloseableImagePrefetchSequences.containsKey(nextProducer)) {
+      Producer<CloseableReference<CloseableImage>> inputProducer) {
+    if (!mCloseableImagePrefetchSequences.containsKey(inputProducer)) {
       SwallowResultProducer<CloseableReference<CloseableImage>> swallowResultProducer =
-          mProducerFactory.newSwallowResultProducer(nextProducer);
-      mCloseableImagePrefetchSequences.put(nextProducer, swallowResultProducer);
+          mProducerFactory.newSwallowResultProducer(inputProducer);
+      mCloseableImagePrefetchSequences.put(inputProducer, swallowResultProducer);
     }
-    return mCloseableImagePrefetchSequences.get(nextProducer);
+    return mCloseableImagePrefetchSequences.get(inputProducer);
+  }
+
+  private static String getShortenedUriString(Uri uri) {
+    final String uriString = String.valueOf(uri);
+    return uriString.length() > 30 ? uriString.substring(0, 30) + "..." : uriString;
   }
 }

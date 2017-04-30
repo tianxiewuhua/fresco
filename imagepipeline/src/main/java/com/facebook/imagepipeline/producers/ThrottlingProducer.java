@@ -12,11 +12,11 @@ package com.facebook.imagepipeline.producers;
 import javax.annotation.concurrent.GuardedBy;
 
 import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.Executor;
 
 import android.util.Pair;
 
 import com.facebook.common.internal.Preconditions;
-import com.facebook.common.internal.VisibleForTesting;
 
 /**
  * Only permits a configurable number of requests to be kicked off simultaneously. If that number
@@ -24,19 +24,24 @@ import com.facebook.common.internal.VisibleForTesting;
  */
 public class ThrottlingProducer<T> implements Producer<T> {
 
-  @VisibleForTesting static final String PRODUCER_NAME = "ThrottlingProducer";
+  public static final String PRODUCER_NAME = "ThrottlingProducer";
 
-  private final Producer<T> mNextProducer;
+  private final Producer<T> mInputProducer;
   private final int mMaxSimultaneousRequests;
 
   @GuardedBy("this")
   private int mNumCurrentRequests;
   @GuardedBy("this")
   private final ConcurrentLinkedQueue<Pair<Consumer<T>, ProducerContext>> mPendingRequests;
+  private final Executor mExecutor;
 
-  public ThrottlingProducer(int maxSimultaneousRequests, final Producer<T> nextProducer) {
+  public ThrottlingProducer(
+      int maxSimultaneousRequests,
+      Executor executor,
+      final Producer<T> inputProducer) {
     mMaxSimultaneousRequests = maxSimultaneousRequests;
-    mNextProducer = Preconditions.checkNotNull(nextProducer);
+    mExecutor = Preconditions.checkNotNull(executor);
+    mInputProducer = Preconditions.checkNotNull(inputProducer);
     mPendingRequests = new ConcurrentLinkedQueue<Pair<Consumer<T>, ProducerContext>>();
     mNumCurrentRequests = 0;
   }
@@ -65,7 +70,7 @@ public class ThrottlingProducer<T> implements Producer<T> {
   void produceResultsInternal(Consumer<T> consumer, ProducerContext producerContext) {
     ProducerListener producerListener = producerContext.getListener();
     producerListener.onProducerFinishWithSuccess(producerContext.getId(), PRODUCER_NAME, null);
-    mNextProducer.produceResults(new ThrottlerConsumer(consumer), producerContext);
+    mInputProducer.produceResults(new ThrottlerConsumer(consumer), producerContext);
   }
 
   private class ThrottlerConsumer extends DelegatingConsumer<T, T> {
@@ -95,7 +100,7 @@ public class ThrottlingProducer<T> implements Producer<T> {
     }
 
     private void onRequestFinished() {
-      Pair<Consumer<T>, ProducerContext> nextRequestPair;
+      final Pair<Consumer<T>, ProducerContext> nextRequestPair;
       synchronized (ThrottlingProducer.this) {
         nextRequestPair = mPendingRequests.poll();
         if (nextRequestPair == null) {
@@ -104,7 +109,13 @@ public class ThrottlingProducer<T> implements Producer<T> {
       }
 
       if (nextRequestPair != null) {
-        produceResultsInternal(nextRequestPair.first, nextRequestPair.second);
+        mExecutor.execute(
+            new Runnable() {
+              @Override
+              public void run() {
+                produceResultsInternal(nextRequestPair.first, nextRequestPair.second);
+              }
+            });
       }
     }
   }

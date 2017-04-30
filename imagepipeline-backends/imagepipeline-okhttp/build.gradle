@@ -12,8 +12,8 @@ dependencies {
 apply from: rootProject.file('release.gradle')
 
 android {
-    buildToolsVersion "21.1.2"
-    compileSdkVersion 21
+    buildToolsVersion rootProject.ext.buildToolsVersion
+    compileSdkVersion rootProject.ext.compileSdkVersion
 
     packagingOptions {
         exclude 'LICENSE'
@@ -34,14 +34,3 @@ task sourcesJar(type: Jar) {
 }
 artifacts.add('archives', sourcesJar)
 
-def jarList = new ArrayList()
-task setJarList() << {
-    configurations.compile.each {
-        jarList.add(it)
-    }
-}
-
-task copyDeps(dependsOn: setJarList, type: Copy) {
-    from jarList
-    into 'build/external'
-}

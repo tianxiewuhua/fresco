@@ -9,25 +9,23 @@
 
 package com.facebook.imagepipeline.producers;
 
-import java.util.concurrent.Executor;
 
 import com.facebook.common.internal.Preconditions;
-import com.facebook.common.internal.VisibleForTesting;
 
 /**
  * Uses ExecutorService to move further computation to different thread
  */
 public class ThreadHandoffProducer<T> implements Producer<T> {
 
-  @VisibleForTesting
-  protected static final String PRODUCER_NAME = "BackgroundThreadHandoffProducer";
+  public static final String PRODUCER_NAME = "BackgroundThreadHandoffProducer";
 
-  private final Executor mExecutor;
-  private final Producer<T> mNextProducer;
+  private final Producer<T> mInputProducer;
+  private final ThreadHandoffProducerQueue mThreadHandoffProducerQueue;
 
-  public ThreadHandoffProducer(final Executor executorService, final Producer<T> nextProducer) {
-    mExecutor = Preconditions.checkNotNull(executorService);
-    mNextProducer = Preconditions.checkNotNull(nextProducer);
+  public ThreadHandoffProducer(final Producer<T> inputProducer,
+                               final  ThreadHandoffProducerQueue inputThreadHandoffProducerQueue) {
+    mInputProducer = Preconditions.checkNotNull(inputProducer);
+    mThreadHandoffProducerQueue = inputThreadHandoffProducerQueue;
   }
 
   @Override
@@ -42,7 +40,7 @@ public class ThreadHandoffProducer<T> implements Producer<T> {
       @Override
       protected void onSuccess(T ignored) {
         producerListener.onProducerFinishWithSuccess(requestId, PRODUCER_NAME, null);
-        mNextProducer.produceResults(consumer, context);
+        mInputProducer.produceResults(consumer, context);
       }
 
       @Override
@@ -58,8 +56,9 @@ public class ThreadHandoffProducer<T> implements Producer<T> {
           @Override
           public void onCancellationRequested() {
             statefulRunnable.cancel();
+            mThreadHandoffProducerQueue.remove(statefulRunnable);
           }
         });
-    mExecutor.execute(statefulRunnable);
+    mThreadHandoffProducerQueue.addToQueueOrExecute(statefulRunnable);
   }
 }

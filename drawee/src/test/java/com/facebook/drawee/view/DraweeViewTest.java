@@ -16,7 +16,7 @@ import com.facebook.drawee.drawable.DrawableTestUtils;
 import com.facebook.drawee.interfaces.DraweeHierarchy;
 import com.facebook.drawee.interfaces.DraweeController;
 import com.facebook.drawee.testing.DraweeMocks;
-import com.facebook.testing.robolectric.v2.WithTestDefaultsRunner;
+import org.robolectric.RobolectricTestRunner;
 
 import org.junit.Before;
 import org.junit.Test;
@@ -28,7 +28,7 @@ import static org.junit.Assert.*;
 import static org.mockito.Mockito.*;
 
 /** Unit test for {@link DraweeView}. */
-@RunWith(WithTestDefaultsRunner.class)
+@RunWith(RobolectricTestRunner.class)
 public class DraweeViewTest {
 
   private DraweeView<DraweeHierarchy> mDraweeView;
@@ -46,6 +46,15 @@ public class DraweeViewTest {
     mDraweeHierarchy = DraweeMocks.mockDraweeHierarchyOf(mTopLevelDrawable);
     mController = DraweeMocks.mockController();
     mDraweeView = new DraweeView<DraweeHierarchy>(activity);
+  }
+
+  @Test
+  public void testSetContentDescription() {
+    String CONTENT_DESCRIPTION = "Test Photo";
+    mController.setContentDescription(CONTENT_DESCRIPTION);
+    mDraweeView.setController(mController);
+    mDraweeView.setContentDescription(mController.getContentDescription());
+    assertSame(mDraweeView.getContentDescription(), CONTENT_DESCRIPTION);
   }
 
   @Test

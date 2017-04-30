@@ -29,7 +29,7 @@ public class InstrumentedMemoryCache<K, V> implements MemoryCache<K, V> {
     if (result == null) {
       mTracker.onCacheMiss();
     } else {
-      mTracker.onCacheHit();
+      mTracker.onCacheHit(key);
     }
     return result;
   }
@@ -43,5 +43,10 @@ public class InstrumentedMemoryCache<K, V> implements MemoryCache<K, V> {
   @Override
   public int removeAll(Predicate<K> predicate) {
     return mDelegate.removeAll(predicate);
+  }
+
+  @Override
+  public boolean contains(Predicate<K> predicate) {
+    return mDelegate.contains(predicate);
   }
 }
